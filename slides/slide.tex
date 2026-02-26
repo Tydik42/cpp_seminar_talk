@@ -1,0 +1,431 @@
+\documentclass{beamer}
+%\documentclass[aspectratio=169]{beamer} % 16:9
+\usepackage{hyperref}
+\usepackage[russian]{babel}
+\usepackage{fontspec}
+
+\usepackage{latexsym,amsmath,xcolor,multicol,booktabs,calligra}
+\usepackage{graphicx,pstricks,listings,stackengine}
+\usepackage{array}
+
+% Ensure Cyrillic glyph coverage under XeLaTeX.
+\setmainfont{Liberation Serif}
+\setsansfont{Liberation Sans}
+\setmonofont{Liberation Mono}
+
+\author{Тагир Гараев}
+\title{Препроцессор C++: власть над текстом и ее пределы}
+\subtitle{Архитектурный разбор + сравнение с Rust и Go}
+\institute{C++ Семинар}
+\date{\today}
+\usepackage{CNU}
+
+% Disable auto TOC frame on each section from CNU.sty.
+\AtBeginSection[]{}
+\AtBeginSubsection[]{}
+
+\definecolor{deepblue}{rgb}{0,0,0.5}
+\definecolor{deepred}{rgb}{0.6,0,0}
+\definecolor{deepgreen}{rgb}{0,0.5,0}
+\definecolor{halfgray}{gray}{0.55}
+
+\lstset{
+    basicstyle=\ttfamily\small,
+    keywordstyle=\bfseries\color{deepblue},
+    emphstyle=\ttfamily\color{deepred},
+    stringstyle=\color{deepgreen},
+    breaklines=true,
+    columns=fullflexible,
+    numbers=left,
+    numberstyle=\small\color{halfgray},
+    rulesepcolor=\color{red!20!green!20!blue!20},
+    frame=shadowbox,
+    language=C++
+}
+
+\lstdefinelanguage{Rust}{
+    morekeywords={as,break,const,continue,crate,else,enum,extern,false,fn,for,if,impl,in,let,loop,match,mod,move,mut,pub,ref,return,self,Self,static,struct,super,trait,true,type,unsafe,use,where,while,macro_rules,println},
+    morecomment=[l]{//},
+    morecomment=[s]{/*}{*/},
+    morestring=[b]",
+    sensitive=true
+}
+
+\lstdefinelanguage{Go}{
+    morekeywords={break,case,chan,const,continue,default,defer,else,fallback,for,func,go,if,import,interface,map,package,range,return,select,struct,switch,type,var},
+    morecomment=[l]{//},
+    morecomment=[s]{/*}{*/},
+    morestring=[b]",
+    sensitive=true
+}
+
+\begin{document}
+
+\begin{frame}
+    \titlepage
+\end{frame}
+
+\begin{frame}{План}
+    \tableofcontents
+\end{frame}
+
+\section{Часть 1: Физика препроцессора}
+
+\begin{frame}{Вводный тезис: две разные машины внутри компиляции}
+    \begin{itemize}
+        \item Современный C++ опирается на типы, шаблоны, concepts и AST-семантику.
+        \item Но до этого запускается отдельный механизм: препроцессор (фаза 4).
+        \item Это язык переписывания токенов: без типов, без областей видимости, без AST.
+        \item Наша задача: понять, где его сила инженерно оправдана, а где начинается саботаж.
+    \end{itemize}
+\end{frame}
+
+\begin{frame}{Конвейер трансляции: где заканчивается текст и начинается смысл}
+    \begin{itemize}
+        \item Стандарт задает однонаправленный конвейер фаз (1..8).
+        \item Фаза 4: \texttt{\#include}, \texttt{\#if}, макро-экспансия, удаление неактивных веток.
+        \item Фаза 7: построение AST, типизация, overload resolution, инстанцирование шаблонов.
+        \item Следствие: на фазе 4 есть власть над текстом, но нет доступа к семантике C++.
+    \end{itemize}
+    \vspace{0.4em}
+    Источники: \cite{cpp_draft_lex_phases,cpp_draft_cpp_pre}.
+\end{frame}
+
+\begin{frame}[fragile]{Инструментарий фазы 4: что именно умеет препроцессор}
+\begin{lstlisting}
+#define PI 3.14
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+#define LOG(fmt, ...) log(fmt, __VA_ARGS__)
+#define STR(x) #x
+#define CAT(a, b) a##b
+\end{lstlisting}
+    \begin{itemize}
+        \item \texttt{\#define}: подстановка токенов по шаблону.
+        \item \texttt{\#}/\texttt{\#\#}: превращение токенов в строку и склейка токенов.
+        \item \texttt{\#if/\#ifdef/\#elif}: ранний срез кода до запуска парсера C++.
+    \end{itemize}
+\end{frame}
+
+\begin{frame}[fragile]{Variadic-макросы: висячая запятая и \texttt{\_\_VA\_OPT\_\_}}
+\begin{lstlisting}
+#define LOG_BAD(fmt, ...) std::printf(fmt, __VA_ARGS__)
+LOG_BAD("Hello");
+\end{lstlisting}
+\begin{lstlisting}
+#define LOG_OK(fmt, ...) std::printf(fmt __VA_OPT__(,) __VA_ARGS__)
+LOG_OK("Hello");
+LOG_OK("x=%d", 42);
+\end{lstlisting}
+    \begin{itemize}
+        \item Исторический костыль: \texttt{, \#\#\_\_VA\_ARGS\_\_} (vendor extension).
+        \item C++20 стандартизировал корректный механизм: \texttt{\_\_VA\_OPT\_\_}.
+    \end{itemize}
+    \vspace{0.3em}
+    Источник: \cite{wg21_p0306r4}.
+\end{frame}
+
+\begin{frame}[fragile]{Условная компиляция и \texttt{\_\_has\_include}}
+\begin{lstlisting}
+#if __has_include(<optional>)
+  #include <optional>
+#else
+  #include "fallback/optional.hpp"
+#endif
+\end{lstlisting}
+    \begin{itemize}
+        \item \texttt{\#if/\#ifdef} физически удаляют ветви до построения AST.
+        \item \texttt{\_\_has\_include} (C++17) дал переносимую проверку наличия заголовка.
+        \item Это базовый паттерн graceful degradation для библиотек.
+    \end{itemize}
+    \vspace{0.3em}
+    Источники: \cite{cpp_draft_cpp_cond,wg21_p0061r1}.
+\end{frame}
+
+\begin{frame}[fragile]{\texttt{\#pragma} и \texttt{\#embed}: backdoor и эволюция}
+\begin{lstlisting}
+#if defined(__clang__)
+  #pragma clang diagnostic push
+  #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
+legacy_api();
+#if defined(__clang__)
+  #pragma clang diagnostic pop
+#endif
+\end{lstlisting}
+\end{frame}
+
+\begin{frame}[fragile]{\texttt{\#pragma} и \texttt{\#embed}: backdoor и эволюция}
+    \begin{itemize}
+        \item \texttt{\#pragma}: прямой интерфейс к конкретному компилятору, использовать локально.
+        \item \texttt{\#embed} (C++26): встраивание ресурсов без генерации гигантских \texttt{.cpp}-массивов.
+        \item Итог: инструменты становятся умнее, но природа фазы 4 остается текстовой.
+    \end{itemize}
+    \vspace{0.3em}
+    Источник: \cite{wg21_p1967r14}.
+\end{frame}
+
+\section{Часть 2: Хорошие паттерны}
+
+\begin{frame}[fragile]{Ленивый control flow: логирование без лишней работы}
+\begin{lstlisting}
+#define LOG_DEBUG(logger, ...)                                   \
+    do {                                                          \
+        if ((logger).is_debug()) {                               \
+            (logger).log(__VA_ARGS__);                           \
+        }                                                         \
+    } while(false)
+\end{lstlisting}
+    \begin{itemize}
+        \item Функция вычисляет аргументы eagerly, даже если логгер их потом отбросит.
+        \item Макрос переносит вычисление внутрь \texttt{if} и устраняет лишний runtime.
+        \item \texttt{do\{...\}while(false)} делает макрос безопасным statement.
+    \end{itemize}
+\end{frame}
+
+\begin{frame}[fragile]{X-Macro: один источник правды для enum + to\_string}
+\begin{lstlisting}
+#define FOR_EACH_STATE(X) \
+    X(IDLE)               \
+    X(RUN)                \
+    X(STOP)
+
+enum class State { #define X(s) s, FOR_EACH_STATE(X) #undef X };
+\end{lstlisting}
+\end{frame}
+
+\begin{frame}[fragile]{X-Macro: один источник правды для enum + to\_string}
+\begin{lstlisting}
+constexpr const char* to_string(State s) {
+    switch (s) { #define X(s) case State::s: return #s; FOR_EACH_STATE(X) #undef X }
+    return "UNKNOWN";
+}
+\end{lstlisting}
+    \begin{itemize}
+        \item Генерация повторяющихся деклараций из одного списка.
+        \item Цена: низкая читаемость, поэтому нужен строгий стиль владения макросом.
+    \end{itemize}
+\end{frame}
+
+
+\begin{frame}[fragile]{Платформенный слой: где \texttt{if constexpr} бессилен}
+\begin{lstlisting}
+#if defined(_WIN32)
+  #include <windows.h>
+#elif defined(__linux__)
+  #include <sys/epoll.h>
+#else
+  #error "Unsupported platform"
+#endif
+\end{lstlisting}
+    \begin{itemize}
+        \item Конфликтующие платформенные API часто нельзя даже парсить вместе в одном TU.
+        \item \texttt{if constexpr} работает на фазе 7, а значит слишком поздно для этой задачи.
+        \item \texttt{\#if}-срез до парсинга здесь является единственным практичным механизмом.
+    \end{itemize}
+\end{frame}
+
+\section{Часть 3: Цена власти}
+
+\begin{frame}{Где начинается саботаж проекта}
+    \begin{itemize}
+        \item Проблема не в самом препроцессоре, а в неправильной зоне применения.
+        \item Опасно использовать макросы для задач бизнес-логики, типов и layout-контрактов.
+        \item Три системные границы: отсутствие гигиены, copy-paste модель, деградация диагностики.
+    \end{itemize}
+\end{frame}
+
+\begin{frame}[fragile]{Предел 1: нет гигиены и границ}
+\begin{lstlisting}
+// packet.hpp
+struct Packet {
+    std::uint32_t id;
+#ifdef ENABLE_PROFILING
+    std::uint64_t ts;
+#endif
+    std::uint32_t payload;
+};
+// sender.cpp:   -DENABLE_PROFILING
+// receiver.cpp:
+\end{lstlisting}
+\end{frame}
+
+\begin{frame}[fragile]{Предел 1: нет гигиены и границ}
+    \begin{itemize}
+        \item Макросы протекают через include-граф и игнорируют namespace-границы.
+        \item Результат: поздние и дорогие ODR-баги на линковке и в рантайме.
+    \end{itemize}
+\end{frame}
+
+\begin{frame}{Предел 2: The Copy-Paste Curse}
+    \begin{itemize}
+        \item Фаза 4 не переиспользует логику как функции/шаблоны, а размножает токены.
+        \item Следствие 1: Macro Expansion Hell в диагностике.
+        \item Следствие 2: скрытый \texttt{.rodata} bloat из-за строк \texttt{\_\_FILE\_\_}, \texttt{\_\_PRETTY\_FUNCTION\_\_}, \texttt{\#expr}.
+        \item Чем глубже иерархия макросов, тем хуже локальность ошибки и сложнее отладка.
+    \end{itemize}
+\end{frame}
+
+\begin{frame}[fragile]{Хороший юзкейс, который легко сломать}
+\begin{lstlisting}
+#define SMART_ASSERT(expr)                                      \
+    do {                                                        \
+        if (!(expr)) {                                          \
+            FatalLog(__FILE__, __LINE__, #expr, "false");      \
+            std::abort();                                       \
+        }                                                       \
+    } while(0)
+\end{lstlisting}
+    \begin{itemize}
+        \item Плюс: \texttt{\#expr} дает строку выражения, \texttt{\_\_FILE\_\_}/\texttt{\_\_LINE\_\_} дают контекст.
+        \item Минус: каждый вызов порождает новые строковые литералы и новый expansion trace.
+        \item На малом масштабе это удобно; на большом масштабе это источник системной стоимости.
+    \end{itemize}
+\end{frame}
+
+\begin{frame}[fragile]{Эффект бабочки: Binary Bloat и Macro Expansion Hell}
+    \begin{lstlisting}
+macro_hell_demo.cpp:29:23: error: 'string' is not a member of 'std'
+...
+macro_hell_demo.cpp:25:28: note: in expansion of macro 'CHECK_16'
+macro_hell_demo.cpp:29:5: note: in expansion of macro 'SMART_ASSERT'
+note: 'std::string' is defined in header '<string>'
+    \end{lstlisting}
+    \begin{itemize}
+        \item Ошибка появляется в фазе 7, но объясняется через шаги мутации текста фазы 4.
+        \item Линкер склеивает только одинаковые строки; уникальные \texttt{\#expr} остаются в \texttt{.rodata}.
+        \item Итог: хуже читаемость ошибок + рост бинарника без роста бизнес-ценности.
+    \end{itemize}
+\end{frame}
+
+\begin{frame}[fragile]{Лекарство: перенос метаданных в фазу 7}
+\begin{lstlisting}
+#include <source_location>
+
+inline void smart_assert(bool expr, const char* expr_str,
+    std::source_location loc = std::source_location::current()) {
+    if (!expr) {
+        FatalLog(loc.file_name(), loc.line(), expr_str);
+        std::abort();
+    }
+}
+\end{lstlisting}
+\end{frame}
+
+\begin{frame}[fragile]{Лекарство: перенос метаданных в фазу 7}
+    \begin{itemize}
+        \item \texttt{\_\_FILE\_\_}/\texttt{\_\_LINE\_\_} уходят из макроса в типобезопасный API.
+        \item Диагностика локализуется в функции, а не в этажах макро-экспансии.
+        \item Для \texttt{\#expr} можно оставить тонкую макро-обертку, тяжелую логику держать в C++.
+    \end{itemize}
+\end{frame}
+
+\begin{frame}{современномый C++: перенос логики на фазу 7}
+    \begin{itemize}
+        \item Вместо \texttt{\#define}-констант: \texttt{constexpr} и inline-переменные.
+        \item Вместо тяжелых макросов для метаданных: \texttt{std::source\_location}.
+        \item Вместо макро-ветвлений внутри логики: \texttt{if constexpr}, concepts, modules.
+        \item Правило: фазе 4 оставлять только то, что невозможно решить после парсинга.
+    \end{itemize}
+\end{frame}
+
+\section{Часть 4: Сравнение подходов (Rust и Go)}
+
+\begin{frame}[fragile]{Rust: сохранить мощь, убрать хаос}
+\begin{lstlisting}[language=Rust]
+#[cfg(target_os = "linux")]
+const TARGET: &str = "linux";
+#[cfg(not(target_os = "linux"))]
+const TARGET: &str = "not-linux";
+\end{lstlisting}
+\end{frame}
+
+\begin{frame}[fragile]{Rust: сохранить мощь, убрать хаос}
+\begin{lstlisting}[language=Rust]
+macro_rules! define_states {
+    ($($state:ident),+ $(,)?) => {
+        enum State { $($state),+ }
+        impl State {
+            fn as_str(self) -> &'static str {
+                match self { $(State::$state => stringify!($state)),+ }
+            }
+        }
+    };
+}
+define_states!(Idle, Running, Failed);
+\end{lstlisting}
+\end{frame}
+
+\begin{frame}[fragile]{Rust: сохранить мощь, убрать хаос}
+    \begin{itemize}
+        \item \texttt{macro\_rules!} сопоставляет и разворачивает токены через matcher/transcriber.
+        \item В правилах доступен фрагмент \texttt{tt} (TokenTree), а гигиена описана как mixed-site.
+        \item \texttt{\#[cfg]} и \texttt{cfg!} задают условную компиляцию в самом языке.
+    \end{itemize}
+    \vspace{0.3em}
+    Источники: \cite{rust_ref_macros_by_example,rust_ref_conditional_compilation}.
+\end{frame}
+
+\begin{frame}[fragile]{Go: радикальный отказ от препроцессора}
+\begin{lstlisting}[language=Go]
+//go:build linux && amd64
+package main
+
+func platformName() string { return "linux-amd64" }
+\end{lstlisting}
+\begin{lstlisting}
+//go:generate stringer -type=State
+type State int
+const (
+    Idle State = iota
+    Running
+    Failed
+)
+\end{lstlisting}
+\end{frame}
+
+\begin{frame}[fragile]{Go: радикальный отказ от препроцессора}
+\begin{itemize}
+        \item Условная сборка задается build constraints (\texttt{//go:build}) на уровне файлов.
+        \item Кодогенерация задается директивами \texttt{//go:generate}.
+        \item \texttt{go generate} не является частью \texttt{go build}: это явный отдельный шаг.
+    \end{itemize}
+    \vspace{0.3em}
+    Источники: \cite{go_cmd_build_constraints,go_cmd_generate,go_faq_headers}.
+\end{frame}
+
+\section{Заключение}
+
+\begin{frame}{Сравнительная таблица подходов}
+    \centering
+    \small
+    \begin{tabular}{p{2cm}p{2.5cm}p{2.5cm}p{2.5cm}}
+        \textbf{Критерий} & \textbf{C++} & \textbf{Rust} & \textbf{Go} \\
+        \hline
+        \textbf{Фаза} & До парсинга & После парсинга & Вне компилятора \\
+        \hline
+        \textbf{Гигиена} & Нет & Есть & N/A \\
+        \hline
+        \textbf{Диагностика} & Expansion Hell & TokenTree & Прямые ошибки \\
+    \end{tabular}
+\end{frame}
+
+\begin{frame}{Финальная формула доклада}
+    \begin{itemize}
+        \item Эволюция C++ не отменяет препроцессор, а сужает его зону ответственности.
+        \item Фаза 4 сильна в раннем срезе кода, \texttt{\#pragma} и тонких zero-overhead обертках.
+        \item Фаза 4 слаба в задачах типов, гигиены и диагностики: их лучше решать на фазе 7.
+        \item Правило архитектора: минимально мощный механизм, достаточный для задачи.
+    \end{itemize}
+    \vspace{0.5em}
+    \centering \textbf{Уважайте фазу 4, но не заставляйте ее играть роль фазы 7.}
+\end{frame}
+
+\section{Источники}
+
+\begin{frame}[allowframebreaks]{Источники}
+    \nocite{cpp_draft_lex_phases,cpp_draft_cpp_pre,cpp_draft_cpp_cond,cppref_preprocessor_replace,wg21_p0061r1,wg21_p0306r4,wg21_p2334r1,wg21_p2437r1,wg21_p1967r14,rust_ref_macros_by_example,rust_ref_conditional_compilation,go_cmd_build_constraints,go_cmd_generate,go_faq_headers}
+    \bibliographystyle{unsrt}
+    \bibliography{ref}
+\end{frame}
+
+\end{document}
