@@ -59,5 +59,3 @@ coverage.out
 *.bcf
 *.run.xml
 
-# Generated slides PDF
-slides/*.pdf
