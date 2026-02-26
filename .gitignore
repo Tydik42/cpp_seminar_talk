@@ -1,41 +1,63 @@
-# Prerequisites
-*.d
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
 
-# Compiled Object files
+# Common build dirs
+build/
+**/build/
+cmake-build-*/
+
+# C/C++
+*.d
 *.slo
 *.lo
 *.o
 *.obj
-
-# Precompiled Headers
 *.gch
 *.pch
-
-# Linker files
 *.ilk
-
-# Debugger Files
 *.pdb
-
-# Compiled Dynamic libraries
 *.so
 *.dylib
 *.dll
-
-# Fortran module files
-*.mod
-*.smod
-
-# Compiled Static libraries
 *.lai
 *.la
 *.a
 *.lib
-
-# Executables
 *.exe
-*.out
 *.app
-
-# debug information files
 *.dwo
+
+# Rust
+**/target/
+
+# Go
+**/bin/
+*.test
+*.coverprofile
+coverage.out
+
+# LaTeX / Beamer
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.log
+*.nav
+*.out
+*.snm
+*.toc
+*.vrb
+*.xdv
+*.synctex.gz
+*.synctex.gz(busy)
+*.bcf
+*.run.xml
+
+# Generated slides PDF
+slides/*.pdf
